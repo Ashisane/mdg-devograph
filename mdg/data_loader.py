@@ -1,0 +1,176 @@
+"""
+data_loader.py — Dataset loader for C. elegans biophysical ABM.
+
+Loads cell volumes (V₀) and contact areas from the experimental dataset.
+Volumes are extracted from Sample04_Volume.csv.
+Contact areas are extracted from Sample04_Stat.csv.
+
+All volumes are averaged over the 4-cell stage (timepoints where ABa, ABp,
+EMS, and P2 are all simultaneously present).
+
+Voxel conversion: 0.09 × 0.09 × 1.0 μm³/voxel = 0.0081 μm³/voxel
+"""
+
+import os
+import numpy as np
+import pandas as pd
+
+# Resolve dataset directory relative to this file
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets")
+
+# Voxel-to-physical conversion
+VOXEL_VOLUME_UM3 = 0.09 * 0.09 * 1.0  # μm³ per voxel
+
+# The four cells present at the 4-cell stage
+FOUR_CELL_NAMES = ["ABa", "ABp", "EMS", "P2"]
+
+
+def load_volumes(data_dir: str = _DATA_DIR) -> dict:
+    """
+    Load V₀ per cell identity, averaged over the 4-cell stage.
+
+    Returns:
+        dict: {cell_name: V0_um3} for ABa, ABp, EMS, P2.
+              V0 is in μm³.
+    """
+    vol_path = os.path.join(data_dir, "Sample04_Volume.csv")
+    df = pd.read_csv(vol_path)
+
+    four_cell_mask = pd.Series(True, index=df.index)
+    for cell in FOUR_CELL_NAMES:
+        four_cell_mask &= df[cell].notna()
+
+    four_cell_tps = df[four_cell_mask].index.tolist()
+    if len(four_cell_tps) == 0:
+        raise ValueError("No timepoints found where all 4 cells are present!")
+
+    volumes = {}
+    for cell in FOUR_CELL_NAMES:
+        voxel_vals = [df.loc[tp, cell] for tp in four_cell_tps]
+        mean_voxels = np.mean(voxel_vals)
+        volumes[cell] = float(mean_voxels * VOXEL_VOLUME_UM3)
+
+    return volumes
+
+
+def load_contact_areas(data_dir: str = _DATA_DIR) -> dict:
+    """
+    Load contact areas per named pair at the 4-cell stage.
+
+    The Stat CSV has a special structure:
+      - Column headers = cell1 names (with .N suffixes for multiple partners)
+      - Row 0 values   = cell2 partner names
+      - Rows 1+        = contact area values per timepoint
+
+    Returns:
+        dict: {(cell1, cell2): mean_contact_area} where cell1 < cell2
+              alphabetically. Areas are in raw dataset units (voxel surface
+              area units).
+    """
+    stat_path = os.path.join(data_dir, "Sample04_Stat.csv")
+    df = pd.read_csv(stat_path, low_memory=False)
+
+    cell2_header = df.iloc[0]
+
+    data_rows = df.iloc[1:] 
+
+    pair_values = {}  
+
+    for col in df.columns[1:]:  
+        base_name = col.split('.')[0]
+        if base_name in FOUR_CELL_NAMES:
+            partner = cell2_header[col]
+            if isinstance(partner, str) and partner in FOUR_CELL_NAMES:
+                pair_key = tuple(sorted([base_name, partner]))
+
+                if pair_key not in pair_values:
+                    pair_values[pair_key] = []
+
+                # Collect values from 4-cell stage rows
+                # The first column 'cell1' has values '1', '2', etc.
+                # 4-cell stage = rows where cell1 is '1' or '2'
+                for idx in data_rows.index:
+                    tp = data_rows.loc[idx, 'cell1']
+                    if tp in ['1', '2']:
+                        val = data_rows.loc[idx, col]
+                        try:
+                            pair_values[pair_key].append(float(val))
+                        except (ValueError, TypeError):
+                            pass
+
+    # Compute mean per pair
+    contacts = {}
+    for pair, vals in pair_values.items():
+        if vals:
+            contacts[pair] = float(np.mean(vals))
+
+    return contacts
+
+
+def verify_constraints(data_dir: str = _DATA_DIR):
+    """
+    Print biological constraint checks:
+      1. Volume ordering: V_ABa ≈ V_ABp > V_EMS > V_P2
+      2. ABa-P2 contact absent
+    """
+    print("=" * 60)
+    print("BIOLOGICAL CONSTRAINT VERIFICATION")
+    print("=" * 60)
+
+    # --- Volume constraints ---
+    volumes = load_volumes(data_dir)
+    print("\n--- V₀ per cell (μm³) ---")
+    for cell in FOUR_CELL_NAMES:
+        print(f"  {cell}: {volumes[cell]:.2f} μm³")
+
+    v_aba = volumes['ABa']
+    v_abp = volumes['ABp']
+    v_ems = volumes['EMS']
+    v_p2 = volumes['P2']
+
+    # Check V_ABa ≈ V_ABp (within 15%)
+    ratio = abs(v_aba - v_abp) / max(v_aba, v_abp)
+    check1 = ratio < 0.15
+    print(f"\n  V_ABa ≈ V_ABp (ratio diff = {ratio:.3f}): "
+          f"{'PASS' if check1 else 'FAIL'}")
+
+    # Check V_ABa, V_ABp > V_EMS
+    check2 = min(v_aba, v_abp) > v_ems
+    print(f"  min(V_ABa, V_ABp) > V_EMS: {'PASS' if check2 else 'FAIL'}")
+
+    # Check V_EMS > V_P2
+    check3 = v_ems > v_p2
+    print(f"  V_EMS > V_P2: {'PASS' if check3 else 'FAIL'}")
+
+    # --- Contact area constraints ---
+    contacts = load_contact_areas(data_dir)
+    print("\n--- Contact areas (raw units) ---")
+    for pair, area in sorted(contacts.items()):
+        print(f"  {pair[0]}-{pair[1]}: {area:.2f}")
+
+    # Check ABa-P2 contact is absent
+    aba_p2_key = tuple(sorted(['ABa', 'P2']))
+    check4 = aba_p2_key not in contacts
+    print(f"\n  ABa-P2 contact absent: {'PASS' if check4 else 'FAIL'}")
+
+    print("\n" + "=" * 60)
+    all_pass = check1 and check2 and check3 and check4
+    print(f"ALL CONSTRAINTS: {'PASS' if all_pass else 'FAIL'}")
+    print("=" * 60)
+
+    return all_pass
+
+
+if __name__ == "__main__":
+    print("Loading volumes...")
+    vols = load_volumes()
+    for k, v in vols.items():
+        print(f"  {k}: {v:.2f} μm³")
+
+    print("\nLoading contact areas...")
+    contacts = load_contact_areas()
+    for pair, area in sorted(contacts.items()):
+        print(f"  {pair[0]}-{pair[1]}: {area:.2f}")
+
+    print("\nRunning constraint checks...")
+    verify_constraints()
