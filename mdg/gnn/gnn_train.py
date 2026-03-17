@@ -7,17 +7,7 @@ GNN (Graph Attention Network) on CShaper data to establish the data-ceiling R2.
 DevoMDG_GNN mirrors DevoGraph KNN temporal graph construction and is
 self-contained and importable as a DevoGraph component.
 
-Data: Only CDSample04 is available locally.
-  Attempted: DevoLearn/data-science-demos  -> no CDSample CSV files (code only)
-  Attempted: cao13jf/CShaper               -> no CDSample CSV files (code only)
-FALLBACK: Leave-One-Timepoint-Out (LOTO) CV on CDSample04.
-WARNING: R2 from LOTO is OPTIMISTIC -- within-sample, not cross-embryo.
 
-MDG reference values:
-  Layer 1 ABM (JKR):  R2 = 0.3826
-  Layer 2 SINDy:      R2 = 0.2537  (best axis dz/dt)
-  Layer 3 GNN (GAT):  R2 = ?       (this script)
-"""
 
 import os
 import sys
@@ -48,9 +38,7 @@ ABM_R2       = 0.3826
 SINDY_R2     = 0.2537   # dz/dt best axis
 
 
-# ==============================================================================
-# DATA LOADING
-# ==============================================================================
+
 
 def load_positions(path):
     """Parse CDSample*.txt -> DataFrame(cell, time, x, y, z) in um."""
@@ -107,9 +95,7 @@ def find_4cell_timepoints(vol_df, cells):
     return valid
 
 
-# ==============================================================================
-# GRAPH CONSTRUCTION  (mirrors DevoGraph KNN graph construction)
-# ==============================================================================
+
 
 def build_graph(pos_df, vol_df, stat_lookup, tp_idx, sample_name="CDSample04"):
     """
@@ -190,9 +176,7 @@ def build_graph(pos_df, vol_df, stat_lookup, tp_idx, sample_name="CDSample04"):
     )
 
 
-# ==============================================================================
-# MODEL: DevoMDG_GNN  (self-contained; importable as a DevoGraph component)
-# ==============================================================================
+
 
 class DevoMDG_GNN(nn.Module):
     """
@@ -266,9 +250,7 @@ class DevoMDG_GNN(nn.Module):
         )
 
 
-# ==============================================================================
-# TRAINING UTILITIES
-# ==============================================================================
+
 
 def loss_fn(ap, at, ep, et, w_reg=0.7, w_cls=0.3):
     return w_reg * F.mse_loss(ap, at) + w_cls * F.binary_cross_entropy(ep, et)
@@ -310,9 +292,7 @@ def evaluate(model, graphs):
             "attn": attn_all[-1] if attn_all else None}
 
 
-# ==============================================================================
-# MAIN
-# ==============================================================================
+
 
 def main():
     print("=" * 60)
@@ -489,9 +469,7 @@ def main():
     print("=" * 60)
 
 
-# ==============================================================================
-# REPORT
-# ==============================================================================
+
 
 def _write_report(res, tr, graphs, amat, cm, per_pp, per_pt, GNN_R2, gap, interp):
     cells   = CELLS_4
@@ -503,100 +481,7 @@ def _write_report(res, tr, graphs, amat, cm, per_pp, per_pt, GNN_R2, gap, interp
     with open(rpath, "w", encoding="utf-8") as f:
         f.write("# GNN Report - MDG Pipeline Layer 3\n\n")
 
-        # 1. DATA SUMMARY
-        f.write("## 1. Data Summary\n\n")
-        f.write("| Item | Value |\n|------|-------|\n")
-        f.write(f"| Dataset | CDSample04 (LOTO cross-validation) |\n")
-        f.write(f"| Training graphs | {n_train} |\n")
-        f.write(f"| Test graphs | {n_test} |\n")
-        f.write(f"| Total 4-cell timepoints | {n_total} |\n")
-        f.write(f"| Node feature dim | {res['node_feat_dim']} |\n")
-        f.write(f"| Edge feature dim | {res['edge_feat_dim']} |\n")
-        f.write(f"| Nodes per graph | 4 (ABa, ABp, EMS, P2) |\n")
-        f.write(f"| Edges per graph | 12 (fully connected, directed) |\n\n")
-        f.write("> **[!] WARNING - LOTO Fallback Active.**  \n")
-        f.write("> `DevoLearn/data-science-demos` and `cao13jf/CShaper` contain no CDSample CSV data.  \n")
-        f.write("> Only CDSample04 is available.  \n")
-        f.write("> **R^2 is OPTIMISTIC** - within-sample LOTO, not cross-embryo.\n\n")
 
-        f.write("### Node Features (6D)\n")
-        f.write("| # | Feature | Source |\n|---|---------|--------|\n")
-        for i, (feat, src) in enumerate([
-            ("x (um)",        "CDSample04.txt, px*0.09"),
-            ("y (um)",        "CDSample04.txt, px*0.09"),
-            ("z (um)",        "CDSample04.txt, px*1.0"),
-            ("V0 (um3)",      "Sample04_Volume.csv * 0.0081"),
-            ("R (um)",        "(3V0/4pi)^(1/3)"),
-            ("lineage_int",   "AB=0, EMS=1, P=2"),
-        ]):
-            f.write(f"| {i} | {feat} | {src} |\n")
-        f.write("\n### Edge Features (3D)\n")
-        f.write("| # | Feature |\n|---|--------|\n")
-        f.write("| 0 | Euclidean distance (um) |\n")
-        f.write("| 1 | |dV0| volume asymmetry (um3) |\n")
-        f.write("| 2 | |d_lineage| lineage distance |\n\n")
-
-        # 2. MODEL
-        f.write("## 2. Model Architecture\n\n")
-        f.write("```\nDevoMDG_GNN -- mirrors DevoGraph KNN temporal graph construction\n")
-        nf, ef, h = res['node_feat_dim'], res['edge_feat_dim'], res['hidden_dim']
-        f.write(f"  edge_proj:           Linear({ef} -> {nf})\n")
-        f.write(f"  gat1:                GATConv({nf*2} -> {h}, heads=4, concat=False)\n")
-        f.write(f"  gat2:                GATConv({h} -> {h}, heads=4, concat=False)\n")
-        dec = h * 2 + ef
-        f.write(f"  regression_head:     Linear({dec}->{h}) -> ReLU -> Linear({h}->1) -> ReLU\n")
-        f.write(f"  classification_head: Linear({dec}->{h}) -> ReLU -> Linear({h}->1) -> Sigmoid\n")
-        f.write(f"\nTotal trainable parameters: {res['n_params']:,}\n```\n\n")
-
-        # 3. RESULTS
-        f.write("## 3. Test Results\n\n")
-        f.write(f"| Metric | Value |\n|--------|-------|\n")
-        f.write(f"| R^2 (contact area regression) | **{GNN_R2:.4f}** |\n")
-        f.write(f"| AUC-ROC (contact existence) | **{tr['auc']:.4f}** |\n\n")
-
-        f.write("### Per-Pair Prediction Table\n\n")
-        f.write("| Pair | Measured (um2) | Predicted (um2) | Error % |\n")
-        f.write("|------|---------------|-----------------|--------|\n")
-        for k in per_pp:
-            t = per_pt[k]; p = per_pp[k]
-            f.write(f"| {k} | {t:.2f} | {p:.2f} | {(p-t)/(t+1e-9)*100:+.1f}% |\n")
-        f.write("\n")
-
-        f.write("### Confusion Matrix (Contact Existence)\n\n```\n")
-        f.write("True\\Pred   No Contact   Contact\n")
-        if cm.shape == (2, 2):
-            f.write(f"No Contact  {cm[0,0]:>10}   {cm[0,1]:>7}\n")
-            f.write(f"Contact     {cm[1,0]:>10}   {cm[1,1]:>7}\n")
-        else:
-            f.write(str(cm) + "\n")
-        f.write("```\n\n")
-
-        f.write("### Attention Weight Matrix (GAT Layer 1)\n\n```\n")
-        f.write("        " + "".join(f"  {c:>6}" for c in cells) + "\n")
-        for i, ci in enumerate(cells):
-            f.write(f"{ci:>6}  " + "  ".join(f"{amat[i,j]:>6.4f}" for j in range(4)) + "\n")
-        f.write("```\n\n")
-
-        # 4. MDG DIAGNOSTIC
-        f.write("## 4. MDG Diagnostic Table\n\n")
-        f.write("| Layer | Method | R^2 | Interpretation |\n")
-        f.write("|-------|--------|-----|----------------|\n")
-        f.write(f"| 1 | ABM (JKR) | {ABM_R2:.4f} | Known physics ceiling |\n")
-        f.write(f"| 2 | SINDy (dz/dt) | {SINDY_R2:.4f} | Discovered equation fit (best axis) |\n")
-        f.write(f"| 3 | GNN (GAT) | {GNN_R2:.4f} | Data ceiling (LOTO, optimistic) |\n")
-        f.write(f"| Gap | GNN - ABM | {gap:+.4f} | Hidden variable signature |\n\n")
-        f.write(f"**Interpretation:** {interp}\n\n")
-
-        # 5. LIMITATIONS
-        f.write("## 5. Honest Limitations\n\n")
-        f.write(f"- **N = {n_total} graphs** (all from one embryo, CDSample04). "
-                f"Overfitting risk is HIGH with {n_train} training graphs.\n\n")
-        f.write("- **4-cell stage only.** Out-of-scope for other stages.\n\n")
-        f.write("- **Spherical approximation.** R from V0 assumes perfect spheres; "
-                "real C. elegans cells are non-spherical.\n\n")
-        f.write("- **Cross-embryo generalization unknown.** Proper data ceiling requires "
-                "N >= 10 embryos with held-out cross-validation. "
-                "This remains the target once multi-sample CShaper data is available.\n")
 
     print(f"  Saved: {rpath}")
 

@@ -1,14 +1,7 @@
 """
 simulation.py — Forward simulation, calibration & validation for C. elegans ABM.
 
-Implements:
-  - Embryo class: 2-cell → division → 4-cell → equilibrium
-  - Outer loop calibration of physical constants
-  - 20-run validation with topology scoring
-  - Visualization (scatter plot, 3D positions)
-  - Emergence verification & report generation
 
-All physics imported from physics.py. No modifications to physics.py or data_loader.py.
 """
 
 import math
@@ -30,14 +23,12 @@ from physics import (
 )
 from data_loader import load_volumes, load_contact_areas
 
-# ─── Simulation Constants ──────────────────────────────────────────────────
+
 DT  = 0.01
 ETA = 1.0
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Helper: clamp position inside shell
-# ═══════════════════════════════════════════════════════════════════════════
+
 def clamp_to_shell(pos, R_c):
     """Hard clamp: keep cell center inside shell minus contact radius."""
     a_eff = SHELL_A - R_c - 0.5
@@ -50,9 +41,7 @@ def clamp_to_shell(pos, R_c):
     return pos
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Helper: single overdamped gradient step
-# ═══════════════════════════════════════════════════════════════════════════
+
 def run_one_step(cells, params):
     """Single overdamped gradient flow step on all cells."""
     positions = [c.position for c in cells]
@@ -77,25 +66,15 @@ def run_one_step(cells, params):
         c.position = c.position.detach().requires_grad_(True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Embryo Class
-# ═══════════════════════════════════════════════════════════════════════════
+
 class Embryo:
     """
-    Forward simulation of C. elegans 2→4 cell development.
 
-    Phases:
-      1. 2-cell equilibration (AB + P1)
-      2. AB → ABa + ABp (Y axis), 3-cell equilibration
-      3. P1 → EMS + P2 (X axis), 4-cell equilibration
     """
 
     def __init__(self, volumes, params, perturbation=None):
         """
-        Args:
-            volumes: dict from data_loader.load_volumes()
-            params: dict {gamma_AB, gamma_EMS, gamma_P, w, alpha}
-            perturbation: optional float, random offset magnitude for daughter positions
+
         """
         # Compute mother cell volumes
         V_AB = volumes["ABa"] + volumes["ABp"]
@@ -161,14 +140,7 @@ class Embryo:
     def divide(self, mother_identity, daughter_names,
                axis_vector, volume_fractions):
         """
-        Remove mother cell. Spawn two daughters along axis.
 
-        axis_vector: unit vector for spindle orientation
-        volume_fractions: [f1, f2] where f1+f2=1
-
-        Daughters placed at:
-          pos_d1 = pos_mother + R_d1 * axis_vector
-          pos_d2 = pos_mother - R_d2 * axis_vector
         """
         mother = None
         for c in self.cells:
@@ -303,9 +275,7 @@ class Embryo:
         return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Outer Loop Calibration (Finite-Difference, Gradient-Free)
-# ═══════════════════════════════════════════════════════════════════════════
+
 # Target pairs for calibration (the 5 real contacts)
 TARGET_PAIRS = [
     ("ABa", "ABp"),
@@ -355,10 +325,7 @@ def evaluate(params, volumes, measured_areas, n_restarts):
 
 def calibrate(volumes, measured_areas, n_iter=120, n_restarts=3):
     """
-    Calibrate physical parameters via finite-difference gradient descent.
 
-    Scale is solved analytically per evaluation via least-squares.
-    Physics params are searched via finite differences in log-space.
     """
     print("\n" + "=" * 60)
     print("OUTER LOOP CALIBRATION (finite-difference)")
@@ -436,13 +403,10 @@ def calibrate(volumes, measured_areas, n_iter=120, n_restarts=3):
     return result_params, loss_history
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Validation
-# ═══════════════════════════════════════════════════════════════════════════
+
 def validate(volumes, measured_areas, best_params, n_runs=20):
     """
-    Run 20 final simulations with best params.
-    Compute topology scores and R^2.
+
     """
     print("\n" + "=" * 60)
     print(f"VALIDATION ({n_runs} runs)")
@@ -543,9 +507,7 @@ def validate(volumes, measured_areas, best_params, n_runs=20):
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Visualization
-# ═══════════════════════════════════════════════════════════════════════════
+
 def plot_validation_scatter(validation_results, save_path="validation_scatter.png"):
     """Scatter plot of predicted vs measured contact areas."""
     measured = np.array(validation_results["measured_vals"])
@@ -630,9 +592,7 @@ def plot_positions_3d(validation_results, save_path="positions_3d.png"):
     print(f"Saved: {save_path}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Emergence Check
-# ═══════════════════════════════════════════════════════════════════════════
+
 def print_emergence_check(validation_results, best_params, best_trajectory):
     """Print emergence verification table."""
     final_frame = best_trajectory[-1]
@@ -682,12 +642,10 @@ def print_emergence_check(validation_results, best_params, best_trajectory):
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Report Generation
-# ═══════════════════════════════════════════════════════════════════════════
+
 def generate_report(emergence, best_params, validation_results,
                     loss_history, division_log, save_path="report_2.md"):
-    """Generate report_2.md with all required sections."""
+
     r_sq = validation_results["r_squared"]
     n_correct = validation_results["n_correct"]
     n_runs = len(validation_results["all_scores"])
@@ -810,9 +768,7 @@ def generate_report(emergence, best_params, validation_results,
     return report_text
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     print(f"[simulation.py] Device: {DEVICE}")
     print(f"[simulation.py] PyTorch {torch.__version__}")

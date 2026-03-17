@@ -16,11 +16,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DTYPE = torch.float64
 print(f"[physics.py] Using device: {DEVICE}")
 
-# Inital config
 SHELL_A = 25.0   # half-axis AP (X), μm
 SHELL_B = 15.0   # half-axis Y, μm
 SHELL_C = 15.0   # half-axis Z, μm
-
 
 K_SHELL = 200.0
 K_VOL   = 0.01
@@ -40,7 +38,6 @@ class CellAgent:
         position : Tensor(3,) — (x, y, z) in μm, requires_grad=True
     """
 
-    # Lineage mapping
     _LINEAGE_MAP = {
         "ABa": "AB", "ABp": "AB", "AB": "AB",
         "EMS": "EMS",
@@ -58,8 +55,6 @@ class CellAgent:
         self.V0 = V0
         self.R = (3.0 * V0 / (4.0 * math.pi)) ** (1.0 / 3.0)
         self.R_c = 0.8 * self.R
-
-        # Position is set externally
         self.position = None
 
     def set_position(self, x: float, y: float, z: float):
@@ -79,12 +74,9 @@ class CellAgent:
                 f"R={self.R:.2f}, pos={pos_str})")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Energy Term 1 — Eggshell Confinement
-# ═══════════════════════════════════════════════════════════════════════════
 def shell_energy(cell: CellAgent) -> torch.Tensor:
     """
-    Ellipsoidal eggshell confinement energy.Added a soft penalty for being outside the shell, zero inside.
+    Ellipsoidal eggshell confinement energy. Soft penalty outside the shell, zero inside.
 
     E_shell = K_shell · clamp(f_eff - 1.0, min=0)²
 
@@ -101,9 +93,6 @@ def shell_energy(cell: CellAgent) -> torch.Tensor:
     return K_SHELL * violation ** 2
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Energy Term 2 — Volume Elasticity
-# ═══════════════════════════════════════════════════════════════════════════
 def _spherical_cap_volume(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
     """
     Compute the spherical cap overlap volume that cell_j removes from cell_i.
@@ -115,9 +104,6 @@ def _spherical_cap_volume(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
     R_i = cell_i.R
     R_j = cell_j.R
 
-    # If cells don't overlap, V_cap = 0
-    # Use a soft check: if d >= R_i + R_j, h_i clamps to 0 naturally
-    # Add small epsilon to avoid division by zero
     d_safe = torch.clamp(d, min=1e-10)
 
     h_i = torch.clamp(
@@ -147,9 +133,6 @@ def volume_energy(cell: CellAgent, all_cells: list) -> torch.Tensor:
     return K_VOL * (V_eff - cell.V0) ** 2
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Energy Term 3 — Overlap Repulsion
-# ═══════════════════════════════════════════════════════════════════════════
 def overlap_repulsion(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
     """
     Hard-core overlap repulsion.
@@ -161,9 +144,6 @@ def overlap_repulsion(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
     return K_REP * overlap ** 2
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Energy Term 4 — Adhesion (Full JKR Contact Mechanics)
-# ═══════════════════════════════════════════════════════════════════════════
 def _get_gamma(cell: CellAgent, params: dict) -> float:
     """Get cortical tension γ for a cell based on its lineage."""
     lineage = cell.lineage
@@ -206,18 +186,14 @@ def jkr_contact_area(
     gamma_i = _get_gamma(cell_i, params)
     gamma_j = _get_gamma(cell_j, params)
 
-    # Step 1: Effective modulus
     E_star_i = 2.0 * gamma_i / R_i
     E_star_j = 2.0 * gamma_j / R_j
     K_star = (4.0 / 3.0) * (E_star_i * E_star_j) / (E_star_i + E_star_j)
 
-    # Step 2: Effective radius
     R_eff = (R_i * R_j) / (R_i + R_j)
 
-    # Step 3: Compressive force
     F = K_REP * torch.clamp(cell_i.R_c + cell_j.R_c - d, min=0.0)
 
-    # Step 4: JKR contact radius
     term1 = 6.0 * math.pi * w * R_eff * F
     term2 = (3.0 * math.pi * w * R_eff) ** 2
     interior = torch.clamp(term1 + term2, min=0.0)
@@ -228,9 +204,8 @@ def jkr_contact_area(
     a_cubed = torch.clamp(a_cubed, min=0.0)
     a = a_cubed ** (1.0 / 3.0)
 
-    # Step 5: Differentiable gate at volumetric radius sum (not R_c)
-    # Cells are "in contact" when surfaces touch (d < R_i + R_j),
-    # not when they are compressed (d < R_c_i + R_c_j).
+    # Gate at volumetric radius sum: cells touch when surfaces meet (d < R_i + R_j),
+    # not just when compressed (d < R_c_i + R_c_j).
     gate = torch.sigmoid(20.0 * (R_i + R_j - d))
     A_contact = math.pi * a ** 2 * gate
 
@@ -250,9 +225,6 @@ def adhesion_energy(
     return -w * A
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Energy Term 5 — Cortical Flow (Phenomenological)
-# ═══════════════════════════════════════════════════════════════════════════
 def cortical_flow_energy(cell: CellAgent, alpha: float) -> torch.Tensor:
     """
     Cortical flow energy for P-lineage cells.
@@ -266,9 +238,6 @@ def cortical_flow_energy(cell: CellAgent, alpha: float) -> torch.Tensor:
         return torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Total Energy
-# ═══════════════════════════════════════════════════════════════════════════
 def total_energy(cells: list, params: dict) -> torch.Tensor:
     """
     Compute total system energy.
@@ -288,13 +257,11 @@ def total_energy(cells: list, params: dict) -> torch.Tensor:
 
     E = torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
 
-    # Single-cell terms
     for cell in cells:
         E = E + shell_energy(cell)
         E = E + volume_energy(cell, cells)
         E = E + cortical_flow_energy(cell, alpha)
 
-    # Pairwise terms
     n = len(cells)
     for i in range(n):
         for j in range(i + 1, n):
@@ -304,9 +271,6 @@ def total_energy(cells: list, params: dict) -> torch.Tensor:
     return E
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Inner Loop — Overdamped Gradient Flow
-# ═══════════════════════════════════════════════════════════════════════════
 def run_inner_loop(
     cells: list,
     params: dict,
@@ -336,7 +300,6 @@ def run_inner_loop(
     Returns:
         (final_E: float, steps_taken: int)
     """
-    # Collect position parameters
     positions = [cell.position for cell in cells]
     optimizer = torch.optim.SGD(positions, lr=lr, momentum=0.0)
 
@@ -348,14 +311,11 @@ def run_inner_loop(
         E = total_energy(cells, params)
         E.backward()
 
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(positions, max_norm=5.0)
-
         optimizer.step()
 
         current_E = E.item()
 
-        # Check convergence
         if prev_E is not None:
             delta = abs(current_E - prev_E)
             if delta < convergence_threshold:

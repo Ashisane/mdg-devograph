@@ -15,13 +15,10 @@ import os
 import numpy as np
 import pandas as pd
 
-# Resolve dataset directory relative to this file
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets")
 
-# Voxel-to-physical conversion
 VOXEL_VOLUME_UM3 = 0.09 * 0.09 * 1.0  # μm³ per voxel
 
-# The four cells present at the 4-cell stage
 FOUR_CELL_NAMES = ["ABa", "ABp", "EMS", "P2"]
 
 
@@ -71,12 +68,10 @@ def load_contact_areas(data_dir: str = _DATA_DIR) -> dict:
     df = pd.read_csv(stat_path, low_memory=False)
 
     cell2_header = df.iloc[0]
+    data_rows = df.iloc[1:]
+    pair_values = {}
 
-    data_rows = df.iloc[1:] 
-
-    pair_values = {}  
-
-    for col in df.columns[1:]:  
+    for col in df.columns[1:]:
         base_name = col.split('.')[0]
         if base_name in FOUR_CELL_NAMES:
             partner = cell2_header[col]
@@ -86,9 +81,7 @@ def load_contact_areas(data_dir: str = _DATA_DIR) -> dict:
                 if pair_key not in pair_values:
                     pair_values[pair_key] = []
 
-                # Collect values from 4-cell stage rows
-                # The first column 'cell1' has values '1', '2', etc.
-                # 4-cell stage = rows where cell1 is '1' or '2'
+                # 4-cell stage rows have '1' or '2' in the first column
                 for idx in data_rows.index:
                     tp = data_rows.loc[idx, 'cell1']
                     if tp in ['1', '2']:
@@ -98,7 +91,6 @@ def load_contact_areas(data_dir: str = _DATA_DIR) -> dict:
                         except (ValueError, TypeError):
                             pass
 
-    # Compute mean per pair
     contacts = {}
     for pair, vals in pair_values.items():
         if vals:
@@ -117,7 +109,6 @@ def verify_constraints(data_dir: str = _DATA_DIR):
     print("BIOLOGICAL CONSTRAINT VERIFICATION")
     print("=" * 60)
 
-    # --- Volume constraints ---
     volumes = load_volumes(data_dir)
     print("\n--- V₀ per cell (μm³) ---")
     for cell in FOUR_CELL_NAMES:
@@ -128,27 +119,22 @@ def verify_constraints(data_dir: str = _DATA_DIR):
     v_ems = volumes['EMS']
     v_p2 = volumes['P2']
 
-    # Check V_ABa ≈ V_ABp (within 15%)
     ratio = abs(v_aba - v_abp) / max(v_aba, v_abp)
     check1 = ratio < 0.15
     print(f"\n  V_ABa ≈ V_ABp (ratio diff = {ratio:.3f}): "
           f"{'PASS' if check1 else 'FAIL'}")
 
-    # Check V_ABa, V_ABp > V_EMS
     check2 = min(v_aba, v_abp) > v_ems
     print(f"  min(V_ABa, V_ABp) > V_EMS: {'PASS' if check2 else 'FAIL'}")
 
-    # Check V_EMS > V_P2
     check3 = v_ems > v_p2
     print(f"  V_EMS > V_P2: {'PASS' if check3 else 'FAIL'}")
 
-    # --- Contact area constraints ---
     contacts = load_contact_areas(data_dir)
     print("\n--- Contact areas (raw units) ---")
     for pair, area in sorted(contacts.items()):
         print(f"  {pair[0]}-{pair[1]}: {area:.2f}")
 
-    # Check ABa-P2 contact is absent
     aba_p2_key = tuple(sorted(['ABa', 'P2']))
     check4 = aba_p2_key not in contacts
     print(f"\n  ABa-P2 contact absent: {'PASS' if check4 else 'FAIL'}")

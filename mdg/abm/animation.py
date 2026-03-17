@@ -1,13 +1,7 @@
 """
 animation.py — Visualization for C. elegans ABM simulation.
 
-Reads pre-computed data from simulation_results.pt.
-Produces:
-  - simulation.mp4 (30fps, ~10-12 seconds)
-  - 4 key-frame PNGs
-  - report_3.md
 
-No physics. Read-only from saved data.
 """
 
 import os
@@ -20,9 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 from mpl_toolkits.mplot3d import Axes3D
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Constants
-# ═══════════════════════════════════════════════════════════════════════════
+
 SHELL_A = 25.0  # half-axis AP (X)
 SHELL_B = 15.0  # half-axis Y
 SHELL_C = 15.0  # half-axis Z
@@ -71,9 +63,7 @@ def avg_color(c1, c2):
     return tuple((a + b) / 2 for a, b in zip(r1, r2))
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Phase 1: Data Loading & Pre-computation
-# ═══════════════════════════════════════════════════════════════════════════
+
 def load_and_precompute():
     print("Loading simulation_results.pt ...")
     data = torch.load("simulation_results.pt", weights_only=False)
@@ -195,9 +185,7 @@ def load_and_precompute():
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Phase 2: Figure Layout
-# ═══════════════════════════════════════════════════════════════════════════
+
 def create_figure(precomputed):
     fig = plt.figure(figsize=(18, 10), facecolor=BG_COLOR)
 
@@ -306,9 +294,7 @@ def create_figure(precomputed):
     return fig, ax3d, ax_devo, ax_energy, ax_contacts
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Phase 3: Sphere mesh helper
-# ═══════════════════════════════════════════════════════════════════════════
+
 # Pre-compute unit sphere mesh
 _u_sphere = np.linspace(0, 2 * np.pi, 20)
 _v_sphere = np.linspace(0, np.pi, 10)
@@ -328,9 +314,7 @@ DEVO_POS = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Phase 3: Animation update
-# ═══════════════════════════════════════════════════════════════════════════
+
 def make_update(fig, ax3d, ax_devo, ax_energy, ax_contacts, precomputed):
     """Create the update function for FuncAnimation."""
     frames_data = precomputed["frames_data"]
@@ -553,9 +537,7 @@ def make_update(fig, ax3d, ax_devo, ax_energy, ax_contacts, precomputed):
     return update
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Phase 4: Render & Save
-# ═══════════════════════════════════════════════════════════════════════════
+
 def save_key_frame(fig, frame_idx, update_fn, filename):
     """Save a single frame as PNG."""
     update_fn(frame_idx)
@@ -574,55 +556,7 @@ def generate_report(precomputed, mp4_path, png_files, duration_s):
     lines = []
     lines.append("# Report 3 -- C. elegans ABM Animation\n")
 
-    lines.append("## 1. ANIMATION DETAILS\n")
-    lines.append(f"- **Total frames**: {TARGET_FRAMES}")
-    lines.append(f"- **FPS**: {FPS}")
-    lines.append(f"- **Duration**: {TARGET_FRAMES / FPS:.1f} seconds")
-    lines.append(f"- **Resolution**: 18x10 inches at 150 DPI")
-    lines.append(f"- **File size**: {mp4_size:.1f} MB")
-    lines.append(f"- **Render time**: {duration_s:.1f} seconds\n")
 
-    lines.append("## 2. FRAME MAPPING\n")
-    lines.append(f"- **AB division**: animation frame {ab_div} / {TARGET_FRAMES}")
-    lines.append(f"- **P1 division**: animation frame {p1_div} / {TARGET_FRAMES}")
-    lines.append(f"- **2-cell stage**: frames 0 to {ab_div - 1 if ab_div else 'N/A'}")
-    lines.append(f"- **3-cell stage**: frames {ab_div} to {p1_div - 1 if p1_div else 'N/A'}")
-    lines.append(f"- **4-cell stage**: frames {p1_div} to {TARGET_FRAMES - 1}\n")
-
-    lines.append("## 3. EMERGENCE SHOWN\n")
-    lines.append("The animation visually demonstrates:")
-    lines.append("- **Cell division**: AB divides perpendicular to AP axis (Y), ")
-    lines.append("  P1 divides parallel to AP axis (X)")
-    lines.append("- **3+1 diamond topology**: After 4-cell equilibration, ")
-    lines.append("  ABa and P2 are NOT in contact (forbidden edge shown as dashed red X)")
-    lines.append("- **Contact graph emergence**: All 5 expected contacts form naturally ")
-    lines.append("  from physics without hardcoding topology")
-    lines.append("- **Energy minimization**: System energy decreases to equilibrium ")
-    lines.append("  after each division event\n")
-
-    lines.append("## 4. KEY FRAMES\n")
-    lines.append(f"- **simulation_frame_2cell.png** (frame {kf['2cell']}): ")
-    lines.append("  Two founding cells (AB and P1) in equilibrium within the eggshell")
-    lines.append(f"- **simulation_frame_3cell.png** (frame {kf['3cell']}): ")
-    lines.append("  Just after AB division into ABa + ABp, 3 cells rearranging")
-    lines.append(f"- **simulation_frame_4cell.png** (frame {kf['4cell']}): ")
-    lines.append("  Just after P1 division into EMS + P2, 4 cells equilibrating")
-    lines.append(f"- **simulation_frame_final.png** (frame {kf['final']}): ")
-    lines.append("  Final 4-cell equilibrium showing the emergent diamond topology\n")
-
-    lines.append("## 5. PROBLEMS FACED AND HOW SOLVED\n")
-    lines.append("_To be filled after rendering._\n")
-
-    lines.append("## 6. FINAL CHECKLIST\n")
-    lines.append(f"- [{'x' if os.path.exists(mp4_path) else ' '}] simulation.mp4 generated")
-    for png in png_files:
-        lines.append(f"- [{'x' if os.path.exists(png) else ' '}] {os.path.basename(png)} saved")
-    lines.append("- [x] ABa-P2 forbidden edge visible throughout 4-cell stage")
-    lines.append("- [x] Division flash visible at both division events")
-    lines.append("- [x] DevoGraph builds correctly")
-    lines.append("- [x] Energy curve shows decrease to equilibrium")
-    lines.append("- [x] Camera rotates")
-    lines.append("- [x] Measured contact area lines shown in bottom center\n")
 
     report_text = "\n".join(lines)
     with open("report_3.md", "w", encoding="utf-8") as f:

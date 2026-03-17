@@ -19,9 +19,7 @@ import numpy as np
 import pandas as pd
 from pysindy.optimizers import STLSQ
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 0. CONSTANTS (from Reports 1 & 2 – do NOT modify source files)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 # Calibrated ABM parameters (Report 2)
 GAMMA_MAP = {"AB": 0.8455053, "EMS": 0.7609548, "P": 0.6826006}
@@ -43,9 +41,7 @@ LIBRARY_NAMES = [
 N_LIB = len(LIBRARY_NAMES)   # 13
 AXES  = ["x", "y", "z"]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. HELPER FUNCTIONS
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def finite_diff(arr: np.ndarray, dt_arr: np.ndarray) -> np.ndarray:
     """
@@ -160,13 +156,9 @@ def survival_info(coef: np.ndarray, lib_names=LIBRARY_NAMES) -> list:
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. LOAD ABM TRAJECTORY
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("=" * 70)
-print("STEP 1 — LOADING ABM DATA (simulation_results.pt)")
-print("=" * 70)
+
+
 
 sim  = torch.load("simulation_results.pt", map_location="cpu", weights_only=False)
 traj = sim["trajectory_4cell"]
@@ -183,7 +175,7 @@ print(f"4-cell stage  :  {n_frames} frames  "
       f"(indices {frames_4cell[0]}–{frames_4cell[-1]}, "
       f"t={int(times_arr[0])}–{int(times_arr[-1])}, dt={dt_abm})")
 
-# ── Extract per-cell time series ────────────────────────────────────────────
+
 pos_abm = {c: np.zeros((n_frames, 3)) for c in CELLS}
 ca_abm  = {c: np.zeros(n_frames)      for c in CELLS}
 nn_abm  = {c: np.zeros(n_frames)      for c in CELLS}
@@ -207,7 +199,7 @@ for fi, fidx in enumerate(frames_4cell):
         ca_abm[cell][fi] = ca_sum
         nn_abm[cell][fi] = float(n_neigh)
 
-# ── Stack into feature + derivative matrices ────────────────────────────────
+
 dt_arr_abm  = np.full(n_frames - 1, dt_abm)
 X_abm_rows  = []
 dX_abm_rows = []
@@ -248,13 +240,9 @@ for ai, axis in enumerate(AXES):
     print(f"  d{axis}/dt:  mean={col.mean():9.4g}  std={col.std():9.4g}  "
           f"min={col.min():9.4g}  max={col.max():9.4g}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. LOAD CSHAPER DATA
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("\n" + "=" * 70)
-print("STEP 2 — LOADING CSHAPER DATA (datasets/CDSample04.txt)")
-print("=" * 70)
+
+
 
 df_raw = pd.read_csv("datasets/CDSample04.txt", sep=r"\s+")
 df4cs  = (df_raw[df_raw["Cell"].isin(CELLS)]
@@ -272,11 +260,6 @@ for cell in CELLS:
     note = "(⚠ < 2 → no derivative)" if len(tps) < 2 else ""
     print(f"  {cell}: {len(tps)} timepoints  {tps}  {note}")
 
-# ── Build CShaper feature + derivative matrices ──────────────────────────────
-# NOTE: CDSample04.txt has positions only (Cell, Time, Z, X, Y).
-# Contact area and n_neighbors are unavailable → set to 0.
-# V0 and gamma taken from calibrated ABM values (Reports 1 & 2).
-# Positions are in CShaper voxel coordinates (different units than ABM μm).
 
 X_cs_rows   = []
 dX_cs_rows  = []
@@ -326,13 +309,9 @@ if CSHAPER_TOO_FEW:
     print(f"\n⚠ WARNING: Only {n_cs_obs} observations (< 10). "
           f"SINDy results for CShaper are PRELIMINARY.")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. SINDy ON ABM DATA
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("\n" + "=" * 70)
-print("STEP 3 — SINDy ON ABM DATA  (STLSQ threshold=0.05, alpha=0.05)")
-print("=" * 70)
+
+
 
 abm_coefs    = {}
 abm_r2s      = {}
@@ -346,19 +325,15 @@ for ai, axis in enumerate(AXES):
     abm_attempts[axis] = atts
     print(f"  → {format_equation(coef, axis)}")
 
-print("\n══ ABM EQUATIONS ══════════════════════════════════════════════════════")
+
 for axis in AXES:
     print(format_equation(abm_coefs[axis], axis))
     r2str = f"{abm_r2s[axis]:.4f}" if not np.isnan(abm_r2s[axis]) else "N/A"
     print(f"   R² = {r2str}\n")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. SINDy ON CSHAPER DATA
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("=" * 70)
-print("STEP 4 — SINDy ON CSHAPER DATA  (STLSQ threshold=0.05, alpha=0.05)")
-print("=" * 70)
+
+
 
 cs_coefs    = {}
 cs_r2s      = {}
@@ -384,19 +359,15 @@ else:
         cs_attempts[axis] = atts
         print(f"  → {format_equation(coef, axis)}")
 
-    print("\n══ CSHAPER EQUATIONS ══════════════════════════════════════════════════")
+    
     for axis in AXES:
         print(format_equation(cs_coefs[axis], axis))
         r2str = f"{cs_r2s[axis]:.4f}" if not np.isnan(cs_r2s[axis]) else "N/A"
         print(f"   R² = {r2str}\n")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. SIDE-BY-SIDE COMPARISON
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("=" * 70)
-print("STEP 5 — EQUATIONS SIDE BY SIDE")
-print("=" * 70)
+
+
 
 for axis in AXES:
     abm_eq = format_equation(abm_coefs[axis], axis)
@@ -404,13 +375,6 @@ for axis in AXES:
     print(f"\n  ABM      {abm_eq}")
     print(f"  CShaper  {cs_eq}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. SAVE sindy_results.pt
-# ─────────────────────────────────────────────────────────────────────────────
-
-print("\n" + "=" * 70)
-print("STEP 6 — SAVING sindy_results.pt")
-print("=" * 70)
 
 
 def build_eq_dict(coefs: dict, r2s: dict) -> dict:
@@ -452,13 +416,9 @@ results_to_save = {
 torch.save(results_to_save, "sindy_results.pt")
 print("  Saved: sindy_results.pt")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. GENERATE sindy_report.md
-# ─────────────────────────────────────────────────────────────────────────────
 
-print("\n" + "=" * 70)
-print("STEP 7 — GENERATING sindy_report.md")
-print("=" * 70)
+
+
 
 TERM_BIOLOGY = {
     "x":    "Position along AP axis (anterior-posterior). "
@@ -511,14 +471,14 @@ def r2str(val):
     return f"{val:.4f}" if val is not None and not np.isnan(val) else "N/A"
 
 
-# ── Collect all terms from both datasets for comparison table ─────────────
+
 all_terms = set()
 for axis in AXES:
     for coef_dict in [abm_coefs, cs_coefs]:
         all_terms |= {t for t, _ in survival_info(coef_dict[axis])}
 all_terms = sorted(all_terms, key=lambda t: LIBRARY_NAMES.index(t) if t in LIBRARY_NAMES else 99)
 
-# ── Build comparison table rows ───────────────────────────────────────────
+
 def get_coef(coef_arr, term):
     if term in LIBRARY_NAMES:
         i = LIBRARY_NAMES.index(term)
@@ -527,7 +487,7 @@ def get_coef(coef_arr, term):
     return "—"
 
 
-# ── Write report ──────────────────────────────────────────────────────────
+
 with open("sindy_report.md", "w", encoding="utf-8") as fout:
 
     def W(s=""):
@@ -540,7 +500,7 @@ with open("sindy_report.md", "w", encoding="utf-8") as fout:
     W("> **Library**: 13 candidate terms (linear, quadratic-position, cross, inverse)")
     W()
 
-    # ── Section 1: Data Summary ─────────────────────────────────────────────
+
     W("---")
     W()
     W("## 1. DATA SUMMARY")
@@ -607,7 +567,7 @@ with open("sindy_report.md", "w", encoding="utf-8") as fout:
       "(not converted to μm), so derivative units differ from ABM.")
     W()
 
-    # ── Section 2: ABM Equations ────────────────────────────────────────────
+
     W("---")
     W()
     W("## 2. ABM EQUATIONS")
@@ -647,7 +607,7 @@ with open("sindy_report.md", "w", encoding="utf-8") as fout:
               "below the sparsity threshold.")
         W()
 
-    # ── Section 3: CShaper Equations ────────────────────────────────────────
+
     W("---")
     W()
     W("## 3. CSHAPER EQUATIONS")
@@ -694,7 +654,7 @@ with open("sindy_report.md", "w", encoding="utf-8") as fout:
               "the system is underdetermined.")
         W()
 
-    # ── Section 4: Comparison Table ─────────────────────────────────────────
+
     W("---")
     W()
     W("## 4. COMPARISON TABLE")
@@ -727,7 +687,7 @@ with open("sindy_report.md", "w", encoding="utf-8") as fout:
                 W(f"| `{term}` | {abm_c} | {cs_c} | {interp} |")
         W()
 
-    # ── Section 5: Scientific Interpretation ────────────────────────────────
+
     W("---")
     W()
     W("## 5. SCIENTIFIC INTERPRETATION")
