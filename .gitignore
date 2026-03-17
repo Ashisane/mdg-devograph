@@ -33,23 +33,21 @@ env/
 *.pth
 *.ckpt
 *.h5
+parsed_training.json
 
-*.mp4
+
 *.log
-*report*.md
-reports/
 gnn_output.txt
 CDSample04.txt
-results/
 tests/outputs/
 gnn_output.txt
-results/
 tests/outputs/
 
 datasets/raw/
 datasets/*.csv
 datasets/*.npy
 datasets/*.npz
+results/*.txt
 
 .vscode/
 .idea/
