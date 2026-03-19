@@ -1,19 +1,24 @@
 """
 simulation.py — Forward simulation, calibration & validation for C. elegans ABM.
-
-
 """
 
 import math
 import copy
 import json
 import time
+import sys
+import os
 import torch
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+
+# data_loader.py lives one level up in mdg/, not in mdg/abm/
+_MDG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _MDG_DIR not in sys.path:
+    sys.path.insert(0, _MDG_DIR)
 
 from physics import (
     CellAgent, shell_energy, volume_energy, overlap_repulsion,
@@ -22,7 +27,6 @@ from physics import (
     SHELL_A, SHELL_B, SHELL_C, DEVICE, DTYPE, K_REP
 )
 from data_loader import load_volumes, load_contact_areas
-
 
 DT  = 0.01
 ETA = 1.0
@@ -43,9 +47,16 @@ def clamp_to_shell(pos, R_c):
 
 
 def run_one_step(cells, params):
-    """Single overdamped gradient flow step on all cells."""
-    positions = [c.position for c in cells]
-    for p in positions:
+    """Single overdamped gradient flow step over all DOFs (position, axes, quaternion)."""
+    dofs = []
+    for c in cells:
+        dofs.append(c.position)
+        if c.axes is not None:
+            dofs.append(c.axes)
+        if c.quaternion is not None:
+            dofs.append(c.quaternion)
+
+    for p in dofs:
         if p.grad is not None:
             p.grad.zero_()
 
@@ -55,15 +66,27 @@ def run_one_step(cells, params):
     with torch.no_grad():
         for c in cells:
             if c.position.grad is not None:
-                grad = c.position.grad.clone()
-                grad = torch.clamp(grad, -5.0, 5.0)
+                grad = torch.clamp(c.position.grad.clone(), -5.0, 5.0)
                 c.position -= (DT / ETA) * grad
-                c.position.data = clamp_to_shell(
-                    c.position.data, c.R_c)
+                c.position.data = clamp_to_shell(c.position.data, c.R_c)
 
-    # Detach and re-enable grad
+            if c.axes is not None and c.axes.grad is not None:
+                grad = torch.clamp(c.axes.grad.clone(), -2.0, 2.0)
+                c.axes -= 5.0 * (DT / ETA) * grad   # 5× LR: contact grad on axes is ~10× weaker
+                c.axes.data = torch.clamp(c.axes.data, min=0.3 * c.R)
+
+            if c.quaternion is not None and c.quaternion.grad is not None:
+                grad = torch.clamp(c.quaternion.grad.clone(), -1.0, 1.0)
+                c.quaternion -= 0.005 * grad
+                norm = torch.norm(c.quaternion.data)
+                c.quaternion.data = c.quaternion.data / (norm + 1e-12)
+
     for c in cells:
         c.position = c.position.detach().requires_grad_(True)
+        if c.axes is not None:
+            c.axes = c.axes.detach().requires_grad_(True)
+        if c.quaternion is not None:
+            c.quaternion = c.quaternion.detach().requires_grad_(True)
 
 
 
@@ -106,7 +129,7 @@ class Embryo:
         self.T_TOTAL = self.T_P1_DIV + self.T_EQUILIBRATE_4CELL
 
     def record_frame(self):
-        """Store current state for animation and validation."""
+        """Store current state (including shape DOFs) for animation and validation."""
         frame = {
             "t": self.t,
             "n_cells": len(self.cells),
@@ -114,13 +137,18 @@ class Embryo:
         }
         for c in self.cells:
             pos = c.position.detach().cpu().numpy()
-            frame["cells"].append({
+            cell_data = {
                 "identity": c.identity,
-                "lineage": c.lineage,
+                "lineage":  c.lineage,
                 "position": pos.tolist(),
-                "R": c.R,
-                "V0": c.V0,
-            })
+                "R":        c.R,
+                "V0":       c.V0,
+            }
+            if c.axes is not None:
+                cell_data["axes"] = c.axes.detach().cpu().numpy().tolist()
+            if c.quaternion is not None:
+                cell_data["quaternion"] = c.quaternion.detach().cpu().numpy().tolist()
+            frame["cells"].append(cell_data)
         frame["contacts"] = self._compute_contacts()
         frame["E_total"] = total_energy(self.cells, self.params).item()
         self.trajectory.append(frame)
@@ -168,7 +196,9 @@ class Embryo:
 
             # Clamp inside shell immediately
             pos = clamp_to_shell(pos, d.R_c)
-            d.position = pos.clone().detach().requires_grad_(True)
+            d.position  = pos.clone().detach().requires_grad_(True)
+            d.axes      = torch.tensor([d.R, d.R, d.R], dtype=DTYPE, device=DEVICE, requires_grad=True)
+            d.quaternion = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=DTYPE, device=DEVICE, requires_grad=True)
             daughters.append(d)
 
         # Remove mother, add daughters

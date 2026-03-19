@@ -3,64 +3,78 @@ physics.py — Biophysical simulation engine for C. elegans early embryogenesis.
 
 Energy terms:
   1. Eggshell confinement (ellipsoidal)
-  2. Volume elasticity (spherical cap overlap)
-  3. Overlap repulsion (hard-core)
-  4. Adhesion (full JKR contact mechanics)
+  2. Volume elasticity / shape energy (deformable ellipsoid)
+  3. Overlap repulsion (hard-core, ellipsoid-aware)
+  4. Adhesion (JKR contact mechanics, ellipsoid-aware)
   5. Cortical flow (P-lineage posterior bias)
+
+CellAgent supports both rigid sphere (axes=None) and deformable ellipsoid modes.
+All pairwise functions fall back to spherical behavior when axes is None,
+preserving backward compatibility with the original 4-cell tests.
 """
 
 import math
 import torch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float64
+DTYPE  = torch.float64
 print(f"[physics.py] Using device: {DEVICE}")
 
 SHELL_A = 25.0   # half-axis AP (X), μm
 SHELL_B = 15.0   # half-axis Y, μm
 SHELL_C = 15.0   # half-axis Z, μm
 
-K_SHELL = 200.0
-K_VOL   = 0.01
-K_REP   = 50.0
+K_SHELL   = 200.0
+K_VOL     = 0.01
+K_REP     = 50.0
+K_DEFORM  = 0.5   # volume conservation — lowered to allow asymmetric contact deformation
+K_ELASTIC = 0.5   # resistance to deviate from sphere
 
 
 class CellAgent:
     """
-    Autonomous cell agent with physical properties.
+    Cell agent supporting both rigid sphere and deformable ellipsoid modes.
 
-    Properties:
-        identity : str   — "ABa", "ABp", "EMS", "P2", etc.
-        lineage  : str   — "AB", "EMS", or "P"
-        V0       : float — target volume in μm³ (from dataset)
-        R        : float — volumetric radius = (3·V0/4π)^(1/3)
-        R_c      : float — contact radius = 0.8 × R
-        position : Tensor(3,) — (x, y, z) in μm, requires_grad=True
+    Rigid sphere (default after set_position):
+        axes = [R, R, R],  quaternion = [1, 0, 0, 0]  (both require_grad=True)
+
+    Deformable ellipsoid DOFs (all require_grad=True):
+        position   : Tensor(3,) — center of mass in μm
+        axes       : Tensor(3,) — semi-axes (a, b, c), constrained > 0
+        quaternion : Tensor(4,) — unit quaternion for orientation
     """
 
     _LINEAGE_MAP = {
-        "ABa": "AB", "ABp": "AB", "AB": "AB",
-        "EMS": "EMS",
-        "P2": "P", "P1": "P", "P": "P",
+        # 2-cell
+        "AB": "AB", "P1": "P",
+        # 4-cell
+        "ABa": "AB", "ABp": "AB", "EMS": "EMS", "P2": "P", "P": "P",
+        # 8-cell
+        "ABar": "AB", "ABal": "AB", "ABpr": "AB", "ABpl": "AB",
+        "MS": "EMS", "E": "EMS",
+        "C": "P", "P3": "P",
     }
 
     def __init__(self, identity: str, V0: float):
-        """
-        Args:
-            identity: Cell name (e.g. "ABa", "ABp", "EMS", "P2")
-            V0: Target volume in μm³
-        """
         self.identity = identity
-        self.lineage = self._LINEAGE_MAP.get(identity, identity)
-        self.V0 = V0
-        self.R = (3.0 * V0 / (4.0 * math.pi)) ** (1.0 / 3.0)
-        self.R_c = 0.8 * self.R
-        self.position = None
+        self.lineage  = self._LINEAGE_MAP.get(identity, identity)
+        self.V0       = V0
+        self.R        = (3.0 * V0 / (4.0 * math.pi)) ** (1.0 / 3.0)
+        self.R_c      = 0.8 * self.R
+        self.position  = None
+        self.axes      = None
+        self.quaternion = None
 
     def set_position(self, x: float, y: float, z: float):
-        """Set cell position, requires_grad=True"""
+        """Set position and initialise shape DOFs (sphere at rest)."""
         self.position = torch.tensor(
             [x, y, z], dtype=DTYPE, device=DEVICE, requires_grad=True
+        )
+        self.axes = torch.tensor(
+            [self.R, self.R, self.R], dtype=DTYPE, device=DEVICE, requires_grad=True
+        )
+        self.quaternion = torch.tensor(
+            [1.0, 0.0, 0.0, 0.0], dtype=DTYPE, device=DEVICE, requires_grad=True
         )
 
     def __repr__(self):
@@ -74,53 +88,146 @@ class CellAgent:
                 f"R={self.R:.2f}, pos={pos_str})")
 
 
-def shell_energy(cell: CellAgent) -> torch.Tensor:
-    """
-    Ellipsoidal eggshell confinement energy. Soft penalty outside the shell, zero inside.
+# ---------------------------------------------------------------------------
+# Geometry helpers for deformable ellipsoids
+# ---------------------------------------------------------------------------
 
-    E_shell = K_shell · clamp(f_eff - 1.0, min=0)²
-
-    where f_eff = (x/a_eff)² + (y/b_eff)² + (z/c_eff)²
-    and a_eff = a - R_c, b_eff = b - R_c, c_eff = c - R_c
+def quaternion_to_rotation(q: torch.Tensor) -> torch.Tensor:
     """
-    pos = cell.position
+    Convert a unit quaternion q = (qw, qx, qy, qz) to a 3×3 rotation matrix.
+    Differentiable — autograd flows through this cleanly.
+    """
+    qw, qx, qy, qz = q[0], q[1], q[2], q[3]
+    R = torch.stack([
+        torch.stack([1 - 2*(qy**2 + qz**2),  2*(qx*qy - qz*qw),  2*(qx*qz + qy*qw)]),
+        torch.stack([2*(qx*qy + qz*qw),  1 - 2*(qx**2 + qz**2),  2*(qy*qz - qx*qw)]),
+        torch.stack([2*(qx*qz - qy*qw),  2*(qy*qz + qx*qw),  1 - 2*(qx**2 + qy**2)]),
+    ])  # (3, 3)
+    return R
+
+
+def effective_radius(cell: "CellAgent", direction: torch.Tensor) -> torch.Tensor:
+    """
+    Effective radius of the ellipsoid in a given unit direction (world frame).
+
+    r_eff = 1 / sqrt( (d_local[0]/a)² + (d_local[1]/b)² + (d_local[2]/c)² )
+
+    For a sphere (a=b=c=R) this returns exactly R for any direction.
+    """
+    Q   = quaternion_to_rotation(cell.quaternion)   # (3, 3)
+    abc = cell.axes                                  # (3,)
+
+    # Project direction into ellipsoid's local frame
+    d_local = Q.T @ direction                        # Q^T · d_hat
+
+    inv_r_sq = (d_local[0] / abc[0])**2 + \
+               (d_local[1] / abc[1])**2 + \
+               (d_local[2] / abc[2])**2
+    return 1.0 / torch.sqrt(inv_r_sq + 1e-12)
+
+
+def ellipsoid_contact_distance(
+    cell_i: "CellAgent", cell_j: "CellAgent"
+) -> tuple:
+    """
+    Compute effective radii of two ellipsoids toward each other.
+
+    Returns (r_eff_i, r_eff_j, d_vec) where:
+        r_eff_i  — effective radius of i toward j
+        r_eff_j  — effective radius of j toward i
+        d_vec    — displacement vector j.pos - i.pos
+    """
+    d_vec = cell_j.position - cell_i.position
+    d_norm = torch.norm(d_vec)
+    d_safe = torch.clamp(d_norm, min=1e-10)
+    d_hat  = d_vec / d_safe
+
+    r_i = effective_radius(cell_i,  d_hat)
+    r_j = effective_radius(cell_j, -d_hat)
+    return r_i, r_j, d_vec
+
+
+# ---------------------------------------------------------------------------
+# Shape energy (new — only active when cell has ellipsoid DOFs)
+# ---------------------------------------------------------------------------
+
+def shape_energy(cell: "CellAgent") -> torch.Tensor:
+    """
+    Two-part deformation penalty:
+      E_vol_deform = K_deform * (a·b·c - R³)²      — volume conservation
+      E_elastic    = K_elastic * Σ(axis_k - R)²     — resistance to deformation
+
+    Returns 0 (scalar tensor) if cell has no axes.
+    """
+    if cell.axes is None:
+        return torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
+
+    a, b, c = cell.axes[0], cell.axes[1], cell.axes[2]
+    R3      = cell.R ** 3
+
+    E_vol  = K_DEFORM  * (a * b * c - R3) ** 2
+    E_elas = K_ELASTIC * ((a - cell.R)**2 + (b - cell.R)**2 + (c - cell.R)**2)
+    return E_vol + E_elas
+
+
+# ---------------------------------------------------------------------------
+# Energy Term 1 — Eggshell Confinement
+# ---------------------------------------------------------------------------
+
+def shell_energy(cell: "CellAgent") -> torch.Tensor:
+    """
+    Ellipsoidal eggshell confinement. Soft penalty outside the shell, zero inside.
+
+    E_shell = K_shell · clamp(f_eff - 1, min=0)²
+    f_eff   = (x/a_eff)² + (y/b_eff)² + (z/c_eff)²,  a_eff = SHELL_A - R_c
+    """
+    pos   = cell.position
     a_eff = SHELL_A - cell.R_c
     b_eff = SHELL_B - cell.R_c
     c_eff = SHELL_C - cell.R_c
 
-    f_eff = (pos[0] / a_eff) ** 2 + (pos[1] / b_eff) ** 2 + (pos[2] / c_eff) ** 2
+    f_eff     = (pos[0]/a_eff)**2 + (pos[1]/b_eff)**2 + (pos[2]/c_eff)**2
     violation = torch.clamp(f_eff - 1.0, min=0.0)
     return K_SHELL * violation ** 2
 
 
-def _spherical_cap_volume(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
-    """
-    Compute the spherical cap overlap volume that cell_j removes from cell_i.
+# ---------------------------------------------------------------------------
+# Energy Term 2 — Volume Elasticity
+# ---------------------------------------------------------------------------
 
-    V_cap_i = π · h_i² · (R_i - h_i/3)  when d < R_i + R_j, else 0
-    h_i = clamp(R_i - (d² + R_i² - R_j²) / (2·d), min=0)
+def _spherical_cap_volume(cell_i: "CellAgent", cell_j: "CellAgent") -> torch.Tensor:
     """
-    d = torch.norm(cell_i.position - cell_j.position)
-    R_i = cell_i.R
-    R_j = cell_j.R
+    Volume of the cap that cell_j carves from cell_i, using effective radii
+    when ellipsoid DOFs are present (falls back to scalar R otherwise).
 
+      h_i = clamp(r_i - (d² + r_i² - r_j²) / (2d), min=0)
+      V   = π h_i² (r_i - h_i/3)
+    """
+    if cell_i.axes is not None and cell_j.axes is not None:
+        r_i, r_j, d_vec = ellipsoid_contact_distance(cell_i, cell_j)
+    else:
+        d_vec = cell_j.position - cell_i.position
+        r_i   = torch.tensor(cell_i.R, dtype=DTYPE, device=DEVICE)
+        r_j   = torch.tensor(cell_j.R, dtype=DTYPE, device=DEVICE)
+
+    d      = torch.norm(d_vec)
     d_safe = torch.clamp(d, min=1e-10)
 
     h_i = torch.clamp(
-        R_i - (d_safe ** 2 + R_i ** 2 - R_j ** 2) / (2.0 * d_safe),
+        r_i - (d_safe**2 + r_i**2 - r_j**2) / (2.0 * d_safe),
         min=0.0
     )
-
-    V_cap = math.pi * h_i ** 2 * (R_i - h_i / 3.0)
-    return V_cap
+    return math.pi * h_i**2 * (r_i - h_i / 3.0)
 
 
-def volume_energy(cell: CellAgent, all_cells: list) -> torch.Tensor:
+def volume_energy(cell: "CellAgent", all_cells: list) -> torch.Tensor:
     """
-    Volume elasticity energy for a single cell.
+    Volume elasticity + shape penalty.
 
-    E_volume = K_vol · (V_eff - V0)²
-    V_eff = (4/3)π·R³ - Σ V_cap(cell, j)
+    E = K_vol · (V_eff - V0)²  +  shape_energy(cell)
+
+    V_eff = (4/3)πR³ - Σ V_cap(cell, j)
+    The shape_energy term is zero for rigid spheres.
     """
     V_full = (4.0 / 3.0) * math.pi * cell.R ** 3
     V_caps = torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
@@ -130,129 +237,133 @@ def volume_energy(cell: CellAgent, all_cells: list) -> torch.Tensor:
             V_caps = V_caps + _spherical_cap_volume(cell, other)
 
     V_eff = V_full - V_caps
-    return K_VOL * (V_eff - cell.V0) ** 2
+    return K_VOL * (V_eff - cell.V0)**2 + shape_energy(cell)
 
 
-def overlap_repulsion(cell_i: CellAgent, cell_j: CellAgent) -> torch.Tensor:
+# ---------------------------------------------------------------------------
+# Energy Term 3 — Overlap Repulsion
+# ---------------------------------------------------------------------------
+
+def overlap_repulsion(cell_i: "CellAgent", cell_j: "CellAgent") -> torch.Tensor:
     """
     Hard-core overlap repulsion.
 
-    E_rep = K_rep · clamp(R_c_i + R_c_j - d, min=0)²
+    Uses ellipsoid effective radii when available; falls back to R_c otherwise.
+    E_rep = K_rep · clamp(R_c_contact - d, min=0)²
     """
-    d = torch.norm(cell_i.position - cell_j.position)
-    overlap = torch.clamp(cell_i.R_c + cell_j.R_c - d, min=0.0)
+    if cell_i.axes is not None and cell_j.axes is not None:
+        r_i, r_j, d_vec = ellipsoid_contact_distance(cell_i, cell_j)
+        d          = torch.norm(d_vec)
+        R_c_sum    = 0.8 * (r_i + r_j)
+    else:
+        d       = torch.norm(cell_i.position - cell_j.position)
+        R_c_sum = cell_i.R_c + cell_j.R_c
+
+    overlap = torch.clamp(R_c_sum - d, min=0.0)
     return K_REP * overlap ** 2
 
 
-def _get_gamma(cell: CellAgent, params: dict) -> float:
-    """Get cortical tension γ for a cell based on its lineage."""
-    lineage = cell.lineage
-    if lineage == "AB":
-        return params['gamma_AB']
-    elif lineage == "EMS":
-        return params['gamma_EMS']
-    elif lineage == "P":
-        return params['gamma_P']
-    else:
-        raise ValueError(f"Unknown lineage: {lineage}")
+# ---------------------------------------------------------------------------
+# Energy Term 4 — Adhesion (JKR contact mechanics)
+# ---------------------------------------------------------------------------
+
+def _get_gamma(cell: "CellAgent", params: dict) -> float:
+    """Cortical tension γ by lineage."""
+    lm = {"AB": params['gamma_AB'], "EMS": params['gamma_EMS'], "P": params['gamma_P']}
+    if cell.lineage not in lm:
+        raise ValueError(f"Unknown lineage: {cell.lineage}")
+    return lm[cell.lineage]
 
 
 def jkr_contact_area(
-    cell_i: CellAgent,
-    cell_j: CellAgent,
+    cell_i: "CellAgent",
+    cell_j: "CellAgent",
     w: float,
     params: dict
 ) -> torch.Tensor:
     """
-    Compute JKR contact area between two cells.
+    JKR contact area between two cells.
 
-    Steps:
-      1. E*_i = 2·γ_i / R_i (Laplace law)
-         K* = (4/3) · (E*_i · E*_j) / (E*_i + E*_j)
-      2. R_eff = (R_i · R_j) / (R_i + R_j)
-      3. F = K_rep · clamp(R_c_i + R_c_j - d, min=0)
-      4. a³ = (R_eff/K*) · [F + 3π·w·R_eff + sqrt(clamp(6π·w·R_eff·F + (3π·w·R_eff)², min=0))]
-         a = clamp(a³, min=0)^(1/3)
-      5. gate = sigmoid(20 · (R_i + R_j - d))
-         A_contact = π · a² · gate
+    When ellipsoid axes are present, effective radii replace R_i/R_j in:
+      - The reduced modulus K*
+      - The effective radius R_eff (harmonic mean)
+      - The compressive force F (via R_c sum)
+      - The contact gate (sigmoid at R_contact)
 
-    Returns:
-        Scalar tensor: contact area in μm²
+    Full derivation in report. Returns contact area in μm².
     """
-    d = torch.norm(cell_i.position - cell_j.position)
-
-    R_i = cell_i.R
-    R_j = cell_j.R
     gamma_i = _get_gamma(cell_i, params)
     gamma_j = _get_gamma(cell_j, params)
 
-    E_star_i = 2.0 * gamma_i / R_i
-    E_star_j = 2.0 * gamma_j / R_j
-    K_star = (4.0 / 3.0) * (E_star_i * E_star_j) / (E_star_i + E_star_j)
+    if cell_i.axes is not None and cell_j.axes is not None:
+        r_i, r_j, d_vec = ellipsoid_contact_distance(cell_i, cell_j)
+        d = torch.norm(d_vec)
+    else:
+        r_i = torch.tensor(cell_i.R, dtype=DTYPE, device=DEVICE)
+        r_j = torch.tensor(cell_j.R, dtype=DTYPE, device=DEVICE)
+        d   = torch.norm(cell_i.position - cell_j.position)
 
-    R_eff = (R_i * R_j) / (R_i + R_j)
+    E_star_i = 2.0 * gamma_i / (r_i + 1e-12)
+    E_star_j = 2.0 * gamma_j / (r_j + 1e-12)
+    K_star   = (4.0 / 3.0) * (E_star_i * E_star_j) / (E_star_i + E_star_j + 1e-12)
 
-    F = K_REP * torch.clamp(cell_i.R_c + cell_j.R_c - d, min=0.0)
+    R_eff = (r_i * r_j) / (r_i + r_j + 1e-12)
 
-    term1 = 6.0 * math.pi * w * R_eff * F
-    term2 = (3.0 * math.pi * w * R_eff) ** 2
+    R_c_sum = 0.8 * (r_i + r_j)
+    F = K_REP * torch.clamp(R_c_sum - d, min=0.0)
+
+    term1    = 6.0 * math.pi * w * R_eff * F
+    term2    = (3.0 * math.pi * w * R_eff) ** 2
     interior = torch.clamp(term1 + term2, min=0.0)
 
-    a_cubed = (R_eff / K_star) * (
+    a_cubed = (R_eff / (K_star + 1e-12)) * (
         F + 3.0 * math.pi * w * R_eff + torch.sqrt(interior)
     )
-    a_cubed = torch.clamp(a_cubed, min=0.0)
-    a = a_cubed ** (1.0 / 3.0)
+    a_cubed  = torch.clamp(a_cubed, min=0.0)
+    a        = a_cubed ** (1.0 / 3.0)
 
-    # Gate at volumetric radius sum: cells touch when surfaces meet (d < R_i + R_j),
-    # not just when compressed (d < R_c_i + R_c_j).
-    gate = torch.sigmoid(20.0 * (R_i + R_j - d))
-    A_contact = math.pi * a ** 2 * gate
-
-    return A_contact
+    # Gate: cells are "in contact" when surfaces meet, not just when compressed
+    R_contact = r_i + r_j
+    gate      = torch.sigmoid(20.0 * (R_contact - d))
+    return math.pi * a**2 * gate
 
 
 def adhesion_energy(
-    cell_i: CellAgent,
-    cell_j: CellAgent,
+    cell_i: "CellAgent",
+    cell_j: "CellAgent",
     w: float,
     params: dict
 ) -> torch.Tensor:
-    """
-    Adhesion energy: E_adh = -w · A_contact
-    """
-    A = jkr_contact_area(cell_i, cell_j, w, params)
-    return -w * A
+    """E_adh = -w · A_contact"""
+    return -w * jkr_contact_area(cell_i, cell_j, w, params)
 
 
-def cortical_flow_energy(cell: CellAgent, alpha: float) -> torch.Tensor:
-    """
-    Cortical flow energy for P-lineage cells.
+# ---------------------------------------------------------------------------
+# Energy Term 5 — Cortical Flow
+# ---------------------------------------------------------------------------
 
-    E_cortical = -α · pos[0]   (only P lineage)
-                = 0             (AB and EMS lineage)
+def cortical_flow_energy(cell: "CellAgent", alpha: float) -> torch.Tensor:
+    """
+    P-lineage posterior bias: E = -α·x  (force pushes cell toward +x).
+    Zero for AB and EMS lineages.
     """
     if cell.lineage == "P":
         return -alpha * cell.position[0]
-    else:
-        return torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
+    return torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
 
+
+# ---------------------------------------------------------------------------
+# Total Energy
+# ---------------------------------------------------------------------------
 
 def total_energy(cells: list, params: dict) -> torch.Tensor:
     """
-    Compute total system energy.
+    E_total = Σ_i [E_shell + E_volume + E_cortical]
+            + Σ_{i<j} [E_rep + E_adh]
 
-    E_total = Σ_i [E_shell_i + E_volume_i + E_cortical_i]
-             + Σ_{i<j} [E_rep_ij + E_adh_ij]
-
-    Args:
-        cells: list of CellAgent
-        params: dict with keys: gamma_AB, gamma_EMS, gamma_P, w, alpha
-
-    Returns:
-        Scalar tensor: total energy
+    shape_energy is embedded in volume_energy — no separate call needed here.
     """
-    w = params['w']
+    w     = params['w']
     alpha = params['alpha']
 
     E = torch.tensor(0.0, dtype=DTYPE, device=DEVICE)
@@ -271,6 +382,10 @@ def total_energy(cells: list, params: dict) -> torch.Tensor:
     return E
 
 
+# ---------------------------------------------------------------------------
+# Inner Loop — Overdamped Gradient Flow (position-only, for test_physics.py)
+# ---------------------------------------------------------------------------
+
 def run_inner_loop(
     cells: list,
     params: dict,
@@ -281,29 +396,16 @@ def run_inner_loop(
     convergence_window: int = 30,
 ) -> tuple:
     """
-    Run overdamped gradient descent (Forward Euler = SGD with zero momentum).
+    Overdamped gradient descent on position only (used by test_6).
 
-    dx/dt = -(1/η)·∇E  →  pos(t+1) = pos(t) - lr·∇E
-    lr = dt/η = 0.01
+    dx/dt = -(1/η)∇E  →  pos(t+1) = pos(t) - lr·∇E
 
     Convergence: |ΔE| < threshold for `window` consecutive steps.
-
-    Args:
-        cells: list of CellAgent with positions set
-        params: physics parameters
-        verbose: print progress
-        max_steps: maximum iterations
-        lr: learning rate (dt/η)
-        convergence_threshold: |ΔE| threshold
-        convergence_window: consecutive steps needed
-
-    Returns:
-        (final_E: float, steps_taken: int)
+    Returns (final_E: float, steps_taken: int).
     """
-    positions = [cell.position for cell in cells]
-    optimizer = torch.optim.SGD(positions, lr=lr, momentum=0.0)
-
-    prev_E = None
+    positions     = [cell.position for cell in cells]
+    optimizer     = torch.optim.SGD(positions, lr=lr, momentum=0.0)
+    prev_E        = None
     converge_count = 0
 
     for step in range(max_steps):

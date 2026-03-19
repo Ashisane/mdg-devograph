@@ -15,11 +15,13 @@ import os
 import numpy as np
 import pandas as pd
 
-_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets")
+# datasets/ lives at the project root (one level above mdg/)
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "datasets")
 
 VOXEL_VOLUME_UM3 = 0.09 * 0.09 * 1.0  # μm³ per voxel
 
-FOUR_CELL_NAMES = ["ABa", "ABp", "EMS", "P2"]
+FOUR_CELL_NAMES  = ["ABa", "ABp", "EMS", "P2"]
+EIGHT_CELL_NAMES = ["ABar", "ABal", "ABpr", "ABpl", "MS", "E", "C", "P3"]
 
 
 def load_volumes(data_dir: str = _DATA_DIR) -> dict:
@@ -46,6 +48,40 @@ def load_volumes(data_dir: str = _DATA_DIR) -> dict:
         voxel_vals = [df.loc[tp, cell] for tp in four_cell_tps]
         mean_voxels = np.mean(voxel_vals)
         volumes[cell] = float(mean_voxels * VOXEL_VOLUME_UM3)
+
+    return volumes
+
+
+def load_volumes_8cell(data_dir: str = _DATA_DIR) -> dict:
+    """
+    Load V0 per cell identity averaged over the 8-cell stage.
+
+    8-cell stage = timepoints where all 8 daughters are simultaneously present.
+    Falls back to None for cells not found (caller must handle with mother.V0/2).
+
+    Returns:
+        dict: {cell_name: V0_um3} for the 8 daughters.
+    """
+    vol_path = os.path.join(data_dir, "Sample04_Volume.csv")
+    df = pd.read_csv(vol_path)
+
+    eight_cell_mask = pd.Series(True, index=df.index)
+    for cell in EIGHT_CELL_NAMES:
+        if cell in df.columns:
+            eight_cell_mask &= df[cell].notna()
+
+    eight_cell_tps = df[eight_cell_mask].index.tolist()
+    if len(eight_cell_tps) == 0:
+        raise ValueError("No timepoints found where all 8 cells are present!")
+
+    volumes = {}
+    for cell in EIGHT_CELL_NAMES:
+        if cell not in df.columns:
+            print(f"  [WARNING] {cell} not found in dataset — will use mother.V0/2 fallback")
+            volumes[cell] = None
+        else:
+            vals = [df.loc[tp, cell] for tp in eight_cell_tps]
+            volumes[cell] = float(np.mean(vals) * VOXEL_VOLUME_UM3)
 
     return volumes
 
