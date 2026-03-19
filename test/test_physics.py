@@ -5,8 +5,15 @@ Runs 6 tests and prints PASS/FAIL for each.
 All 6 tests must pass before Prompt 2 begins.
 """
 
+import sys
+import os
 import math
 import torch
+
+# physics.py lives in mdg/abm/; this file is in test/
+_ABM_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mdg", "abm")
+if _ABM_DIR not in sys.path:
+    sys.path.insert(0, _ABM_DIR)
 
 from physics import (
     CellAgent, DEVICE, DTYPE,
