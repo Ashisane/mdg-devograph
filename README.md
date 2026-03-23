@@ -1,8 +1,8 @@
 # Mechanistic Developmental Graph (MDG)
 
-**C. elegans early embryogenesis — from physics to discovered equations**
+**C. elegans early embryogenesis - from physics to discovered equations**
 
-Most computational approaches to developmental biology start with a graph and ask a learning algorithm to characterize it. This project inverts that. The developmental graph is never prescribed — it emerges from physical first principles, and the goal is to discover the equations that govern why it takes the shape it does.
+Most computational approaches to developmental biology start with a graph and ask a learning algorithm to characterize it. This project inverts that. The developmental graph is never prescribed - it emerges from physical first principles, and the goal is to discover the equations that govern why it takes the shape it does.
 
 This is a GSoC 2026 project proposal for [DevoWorm / OpenWorm](https://devoworm.weebly.com), directly extending the DevoGraph framework's Neural Developmental Programs direction.
 
@@ -92,17 +92,76 @@ Two terms survived out of thirteen candidates. Near equilibrium, cell velocity i
 
 ---
 
-## Why the 8-cell stage failed — and why that matters
 
-Extending the spherical ABM to 8 cells fails: at that packing density, every sphere touches every other sphere regardless of physical parameters. The model correctly diagnoses its own breakdown. This is a finding, not a bug.
+## Why the 8-cell stage failed — and what I did about it
 
-It identifies exactly what physics is missing: explicit cell shape deformation. The natural GSoC extension is a vertex model, where cells are deformable polyhedra with explicit membrane mechanics. This resolves the geometric ceiling and extends the pipeline beyond the 4-cell stage.
+Extending a spherical cell ABM to 8 cells fails by construction: at that packing density, every sphere touches every other sphere regardless of physical parameters. When I ran the spherical model at the 8-cell stage, the contact table came back 28/28 — all 28 pairs non-zero. Completely degenerate. The model correctly diagnosed its own breakdown, which is itself a finding.
+
+The real fix is a **vortex model** — a cytoplasmic rotation term that drives cortical streaming in P-lineage cells (the same PAR-protein machinery that already governs the AB/P1 asymmetry in the 4-cell stage). Without it, the EMS cell divides into MS and E without any driving force to push E ventral and posterior. E ends up trapped at the embryo center in a symmetric force well, touching all four AB daughters symmetrically. The topology is physically impossible to recover from that starting point.
+
+I removed the vortex 8-cell simulation entirely rather than ship something I knew was wrong.
+
+---
+
+## 8-Cell Stage — Deformable Ellipsoid Validation
+
+To validate the deformable cell extension before implementing the full vortex model, I built a separate 8-cell simulation using deformable ellipsoids. The idea was simple: if cell shape can vary during contact, the adhesion zone becomes anisotropic. Cells elongate along the division axis, creating asymmetric contact distributions that restrict topology in ways rigid spheres cannot.
+
+This is not the complete story — it's a validation step.
+
+### What I implemented
+
+Each cell is now represented by three independent semi-axes (a, b, c) governed by their own gradient descent, separate from the position and orientation degrees of freedom. The JKR contact model was extended to use the effective radius from the touching ellipsoid surfaces rather than a fixed sphere radius. All six divisions from 2-cell to 8-cell were simulated, with volumes extracted directly from `Sample04_Volume.csv`.
+
+The main diagnostic problems I found and fixed before running the final simulation:
+
+| Root Cause | Fix | Result |
+|------------|-----|--------|
+| Position gradients 20–30× above clip (57–155, clip at 5.0) | Raise clip to 20.0 | Cells take 4× larger steps |
+| Axes LR 0.05 with gradient 900 → 45 μm/step, clamped every step | Lower LR to 0.005, raise clip to 5.0 | Axes update 0.025 μm/step max |
+| 4-cell equil only 300 steps (not converged) | Raise to 800 with adaptive stop | Phase now genuinely converging |
+| E cell placed at EMS origin, trapped at embryo center | Add 15% R symmetry-breaking nudge | E moves to 7.94 μm from center |
+| 40-step inter-division gaps (2 μm max displacement each) | Raise to 150 steps | Cells have time to reorganize |
+| EMS division before AB daughters settle in Z | Delay EMS from T_ABA+80 to T_ABA+160 | E placed after AB daughters fixed |
+
+### Results
+
+![8-cell final frame](results/images/frame_8cell_final.png)
+*8-cell equilibrium. Deformable ellipsoids. Cells colored by lineage: AB daughters (blue), MS/E (orange), C/P3 (red). Contact edges shown where area > 30 μm².*
+
+![4-cell final frame](results/images/frame_4cell_final.png)
+*4-cell final equilibrium from the same simulation run. The 3+1 diamond topology is preserved.*
+
+> [Watch the 8-cell simulation animation](results/simulation_8cell.mp4)
+
+**Contact topology at 8-cell equilibrium:**
+
+| Metric | Spherical model | Deformable model |
+|--------|----------------|-----------------|
+| Non-zero contact pairs | 28/28 | **7/28** |
+| Expected contacts present | — | 4/9 |
+| E at embryo center | YES | **NO (7.94 μm)** |
+| Energy converging | PARTIAL | **YES (all phases)** |
+
+The deformable model reduced degenerate contacts from 28/28 to 7/28 — a 50% improvement. Cell shape genuinely restricts topology. The four confirmed contacts (ABar–ABpr, ABal–ABpl, MS–E, MS–C) are all biologically expected.
+
+The five missing expected contacts (ABar–MS, ABal–MS, ABpr–C, ABpl–C, E–P3) reflect the same structural problem: without cytoplasmic rotation, the AB daughters migrate anterior and MS/C/P3 cluster posterior. The 20 μm separation between these groups doesn't close within the equilibration budget. This is exactly what the vortex model would fix.
+
+### What this tells me
+
+The deformable model is doing the right thing physically — cells elongate along their division axes, creating anisotropic adhesion zones, which is what real blastomeres do. The E cell now has a biologically sensible position (ventral-anterior hemisphere). The degenerate score of 7/28 shows that shape matters for topology at this stage.
+
+But the model still lacks the directional cytoplasmic flow that positions E correctly relative to P3, and that pushes MS into contact range of the AB daughters. These are not tuning problems — they require new physics.
+
+The scientific contribution of the deformable model is clear: **cell shape is necessary but not sufficient for correct 8-cell topology.** Shape alone reduces degeneracy by half. Shape plus cortical rotation would, I expect, recover the full 9/9 expected contacts.
 
 ---
 
 ## Connection to DevoGraph
 
 The GNN component (`DevoMDG_GNN`) mirrors DevoGraph's KNN temporal graph construction and is designed as a direct DevoGraph component — importable, self-contained, and compatible with the existing framework. The MDG pipeline sits within DevoGraph's Neural Developmental Programs direction: instead of learning representations of a fixed graph, it builds the graph from physics and discovers the laws that generate it.
+
+The 8-cell deformable model is the first step toward replacing DevoGraph's KNN-approximate contact edges with mechanistically justified ones. At the 8-cell stage, KNN would connect all 28 pairs — the same degenerate result as the spherical model. The deformable model with 7/28 non-zero contacts is the first biologically constrained contact graph I've been able to generate at this stage.
 
 ---
 
@@ -112,24 +171,32 @@ The GNN component (`DevoMDG_GNN`) mirrors DevoGraph's KNN temporal graph constru
 /
 ├── mdg/
 │   ├── abm/
-│   │   ├── physics.py          # Energy terms, JKR mechanics, CellAgent
-│   │   ├── simulation.py       # 2→4 cell Embryo, calibration, inner/outer loops
-│   │   └── animation.py        # Visualization, 300-frame mp4 generation
+│   │   ├── physics.py              # Energy terms, JKR mechanics, CellAgent, lineage map
+│   │   ├── simulation.py           # 2→4 cell Embryo, calibration, run_one_step
+│   │   ├── simulation_8cell.py     # 8-cell extension with deformable ellipsoids
+│   │   ├── animation.py            # 4-cell animation (300 frames)
+│   │   └── animation_8cell.py      # 8-cell animation (3-panel: 3D, DevoGraph, energy)
 │   ├── gnn/
-│   │   └── gnn_train.py        # DevoMDG_GNN — DevoGraph-compatible GAT architecture
-│   └── sindy/
-│       ├── sindy_analysis.py   # SINDy pipeline, equation discovery
-│       ├── data_loader.py      # CShaper dataset loading utilities
-│       └── inspect_data.py
+│   │   └── gnn_train.py            # DevoMDG_GNN — DevoGraph-compatible GAT architecture
+│   ├── sindy/
+│   │   ├── sindy_analysis.py       # SINDy pipeline, equation discovery
+│   │   └── inspect_data.py
+│   └── data_loader.py              # CShaper dataset loading (4-cell and 8-cell volumes)
 ├── datasets/
-│   ├── CDSample04.txt          # Cell positions over time (CShaper)
-│   ├── Sample04_Volume.csv     # Cell volumes per timepoint
-│   └── Sample04_Stat.csv       # Pairwise contact area matrix
+│   ├── CDSample04.txt              # Cell positions over time (CShaper)
+│   ├── Sample04_Volume.csv         # Cell volumes per timepoint (all stages)
+│   └── Sample04_Stat.csv          # Pairwise contact area matrix
 ├── test/
-│   └── test_physics.py         # 6 physics unit tests — all passing
+│   └── test_physics.py             # Physics unit tests
 └── results/
-    ├── images/                 # Simulation frames, scatter, training curve
-    └── simulation.mp4          # 300-frame animation
+    ├── images/                     # Simulation frames, scatter, training curves
+    ├── simulation.mp4              # 4-cell animated simulation
+    ├── simulation_8cell.mp4        # 8-cell animated simulation
+    ├── simulation_results_8cell.pt # 8-cell trajectory, topology, volumes
+    └── reports/
+        ├── report_6.md             # 8-cell initial run analysis
+        ├── report_6b.md            # Post-fix results (deformable model)
+        └── diagnostic_report.md    # Root cause analysis for 8-cell failures
 ```
 
 ---
@@ -138,18 +205,35 @@ The GNN component (`DevoMDG_GNN`) mirrors DevoGraph's KNN temporal graph constru
 
 ```bash
 pip install torch numpy pandas pysindy torch-geometric --break-system-packages
-python mdg/abm/simulation.py        # ABM — calibration + validation
-python mdg/sindy/sindy_analysis.py  # SINDy — equation discovery
-python mdg/gnn/gnn_train.py         # GNN — data ceiling diagnostic
+
+# 4-cell — calibration + validation (~2 hours CPU)
+python mdg/abm/simulation.py
+
+# 8-cell — deformable model (~5 minutes CPU, requires simulation.py to have run first)
+python mdg/abm/simulation_8cell.py
+
+# 4-cell animation
+python mdg/abm/animation.py
+
+# 8-cell animation (requires simulation_8cell.pt)
+python mdg/abm/animation_8cell.py
+
+# SINDy equation discovery
+python mdg/sindy/sindy_analysis.py
+
+# GNN data ceiling diagnostic
+python mdg/gnn/gnn_train.py
 ```
 
-Calibration runs ~2 hours on CPU. Simulation and SINDy run in seconds once parameters are loaded.
+Calibration runs ~2 hours on CPU. The 8-cell simulation runs in ~5 minutes using calibrated parameters from the 4-cell run.
 
 ---
 
 ## Honest limitations
 
-The model has two biologically grounded parameters (γ, w) and three regularization constants (K_shell, K_vol, K_rep) that enforce physical constraints but are not derived from measurable quantities. The inner loop is deterministic — real Langevin dynamics would include a thermal noise term absent here. The CShaper comparison in SINDy is blocked by data sparsity: only 8 usable observations exist for the 4-cell stage in CDSample04, making the system underdetermined with 13 library terms. The GNN data ceiling measurement requires multi-embryo CShaper data not currently available.
+The 4-cell model has two biologically grounded parameters (γ, w) and three regularization constants (K_shell, K_vol, K_rep) that enforce physical constraints but are not derived from measurable quantities. The inner loop is deterministic — real Langevin dynamics would include a thermal noise term absent here. The CShaper comparison in SINDy is blocked by data sparsity: only 8 usable observations exist for the 4-cell stage in CDSample04, making the system underdetermined with 13 library terms.
+
+For the 8-cell model specifically: the deformable ellipsoid extension improves topology (7/28 instead of 28/28 degenerate contacts) but cannot recover the full 9/9 expected contacts without cytoplasmic rotation mechanics. The E cell position is now biologically plausible but not fully correct. The gradient clipping approach works but produces slow convergence in the posterior hemisphere — MS, C, and P3 have position gradients above 150 that are being clipped, meaning they're taking shorter steps than the physics would suggest. A more sophisticated integration scheme (adaptive step size, or removing the clip in favor of a proper solver) would improve this.
 
 ---
 
@@ -157,4 +241,4 @@ The model has two biologically grounded parameters (γ, w) and three regularizat
 
 **Organization:** INCF / OpenWorm DevoWorm  
 **Project:** DevoGraph - Neural Developmental Programs  
-**Applicant:** Utkarsh Tyagi, IIIT Sonepat
+**Applicant:** Utkarsh Tyagi, IIIT Sonepat
