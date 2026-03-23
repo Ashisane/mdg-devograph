@@ -281,7 +281,7 @@ def make_animation(pt_path, out_mp4, frame_4cell_png, frame_8cell_png):
 
     # Time series for energy panel
     frame_ts   = [f["t"] for f in frames]
-    energies   = [f["E_total"] for f in frames]
+    energies   = [abs(f["E_total"]) for f in frames]  # abs for log scale
     min_e = min(e for e in energies if e > 0 and math.isfinite(e))
     max_e = max(e for e in energies if math.isfinite(e))
 
@@ -314,7 +314,8 @@ def make_animation(pt_path, out_mp4, frame_4cell_png, frame_8cell_png):
     ax_eng.set_facecolor(BG_COLOR)
     ax_eng.tick_params(colors='white', labelsize=6)
     ax_eng.set_xlabel("t (step)", color='white', fontsize=7)
-    ax_eng.set_ylabel("E_total", color='white', fontsize=7)
+    ax_eng.set_ylabel("|E_total| (log)", color='white', fontsize=7)
+    ax_eng.set_yscale('log')
     for spine in ax_eng.spines.values():
         spine.set_edgecolor('#334155')
 
@@ -347,7 +348,7 @@ def make_animation(pt_path, out_mp4, frame_4cell_png, frame_8cell_png):
 
     # Draw energy history lines (full range)
     ax_eng.set_xlim(min(frame_ts), max(frame_ts))
-    ax_eng.set_ylim(min_e * 0.9, max_e * 1.1)
+    ax_eng.set_ylim(max(min_e * 0.9, 1e-3), max_e * 1.1)
 
     # Pre-draw vertical markers for divisions
     for df_idx in div_frames:

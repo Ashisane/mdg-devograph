@@ -66,13 +66,13 @@ def run_one_step(cells, params):
     with torch.no_grad():
         for c in cells:
             if c.position.grad is not None:
-                grad = torch.clamp(c.position.grad.clone(), -5.0, 5.0)
+                grad = torch.clamp(c.position.grad.clone(), -20.0, 20.0)
                 c.position -= (DT / ETA) * grad
                 c.position.data = clamp_to_shell(c.position.data, c.R_c)
 
             if c.axes is not None and c.axes.grad is not None:
-                grad = torch.clamp(c.axes.grad.clone(), -2.0, 2.0)
-                c.axes -= 5.0 * (DT / ETA) * grad   # 5× LR: contact grad on axes is ~10× weaker
+                grad = torch.clamp(c.axes.grad.clone(), -5.0, 5.0)
+                c.axes -= 0.005 * grad   # lower LR: old 0.05 caused axes thrashing (45 μm/step)
                 c.axes.data = torch.clamp(c.axes.data, min=0.3 * c.R)
 
             if c.quaternion is not None and c.quaternion.grad is not None:
